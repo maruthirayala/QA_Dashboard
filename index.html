@@ -3,10 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QA Dashboard — TestRail Milestone Status (GP v2)</title>
-  <meta name="description" content="Client-side TestRail milestone dashboard (SQLite + SQL.js + Chart.js)">
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="preconnect" href="https://sql.js.org" crossorigin>
+  <title>QA Dashboard — TestRail Milestone Status (v3 OFFLINE)</title>
+  <meta name="description" content="Offline TestRail dashboard (SQLite + SQL.js + Chart.js) with local assets">
   <style>
     :root { --bg:#0f172a; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --blue:#60a5fa; --green:#34d399; --amber:#f59e0b; --violet:#a78bfa; --rose:#fb7185; --cyan:#22d3ee; }
     html,body{height:100%}
@@ -36,56 +34,21 @@
     .note{color:#cbd5e1;font-size:.9rem}
     #banner{display:none;margin-top:10px;padding:10px;border-radius:8px;background:#1f2937;color:#e5e7eb;border:1px solid #374151}
   </style>
-  <script>
-    // Dynamically load scripts with fallback and resolve when ready
-    function loadScript(src){
-      return new Promise(function(resolve, reject){
-        var s=document.createElement('script'); s.src=src; s.async=true;
-        s.onload=function(){ resolve(); };
-        s.onerror=function(){ reject(new Error('Failed to load '+src)); };
-        document.head.appendChild(s);
-      });
-    }
-
-    // Load Chart.js from jsDelivr, fallback to cdnjs if needed
-    function ensureChart(){
-      if(window.Chart) return Promise.resolve();
-      return loadScript('https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js')
-        .catch(function(){ return loadScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'); });
-    }
-
-    // Load SQL.js JS shim from sql.js.org (preferred), fallback to jsDelivr
-    function ensureSqlJs(){
-      if(window.initSqlJs) return Promise.resolve();
-      return loadScript('https://sql.js.org/dist/sql-wasm.js')
-        .catch(function(){ return loadScript('https://cdn.jsdelivr.net/npm/sql.js@1.8.0/dist/sql-wasm.js'); });
-    }
-
-    function showBanner(msg){
-      var b=document.getElementById('banner');
-      if(!b) return; b.style.display='block'; b.textContent=msg;
-    }
-
-    // Ensure both libraries are present before our app runs
-    Promise.all([ensureChart(), ensureSqlJs()]).then(function(){
-      window.__libsReady = true;
-    }).catch(function(err){
-      console.error(err);
-      showBanner('Dependency failed to load: '+ err.message + ' — check corporate CDN/firewall rules.');
-    });
-  </script>
+  <!-- Local offline assets (no CDN) -->
+  <script src="assets/chart.umd.js"></script>
+  <script src="assets/sql-wasm.js"></script>
 </head>
 <body>
 <header>
   <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M3 13a9 9 0 1 1 18 0v5a2 2 0 0 1-2 2h-1v-7a1 1 0 0 0-1-1h-2v-8H9a1 1 0 0 0-1 1v7H7a2 2 0 0 1-2-2v-5Z" stroke="#60a5fa" stroke-width="1.4"/></svg>
-  <h1>QA Dashboard — TestRail Milestone Status</h1>
+  <h1>QA Dashboard — TestRail Milestone Status (Offline)</h1>
 </header>
 <div class="container">
   <div class="controls">
     <div class="panel filebox">
       <div><strong>Select your SQLite DB (*.db)</strong></div>
       <input id="dbfile" type="file" accept=".db,.sqlite,.sqlite3" />
-      <div class="note">Runs 100% in your browser. No data is uploaded. SQL.js (WASM) is fetched from sql.js.org with jsDelivr fallback.</div>
+      <div class="note">No internet required. SQL.js & Chart.js are served from <code>/assets</code>. Your DB stays in the browser.</div>
       <div id="banner"></div>
     </div>
     <div class="panel" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
@@ -148,74 +111,72 @@
 </div>
 
 <script>
-// Run after window load to be extra safe on GitHub Pages
+// Run after window load to ensure local libs are present
 window.addEventListener('load', function(){
-  if(!window.__libsReady){
-    console.warn('Libraries not ready yet; retrying in 250ms');
-    return setTimeout(initApp, 250);
+  function showBanner(msg){ var b=document.getElementById('banner'); if(!b) return; b.style.display='block'; b.textContent=msg; }
+
+  if (typeof initSqlJs !== 'function') {
+    showBanner('SQL.js not found. Make sure /assets/sql-wasm.js is present.');
+    return;
   }
-  initApp();
-
-  function initApp(){
-    var SQL; var db; var charts = {};
-    var schema = { table: null, cols: { project:'project_name', milestone:'milestone_name', run:'run_name', testcase:'testcase_id', status:'status', tags:'tags', refs:'refs', open:'open_defects', closed:'closed_defects' }, hasDefects: false };
-    var DEFECT_KEY_REGEX = /^[A-Z][A-Z0-9]+-\d+$/;
-
-    var fileInput = document.getElementById('dbfile');
-    var projectFilter = document.getElementById('projectFilter');
-    var milestoneFilter = document.getElementById('milestoneFilter');
-    var onlyRegression = document.getElementById('onlyRegression');
-    var refreshBtn = document.getElementById('refreshBtn');
-    var topNRefsInput = document.getElementById('topNRefs');
-    var hideBlankRefs = document.getElementById('hideBlankRefs');
-    var schemaStatus = document.getElementById('schemaStatus');
-    var defectsRow = document.getElementById('defectsRow');
-    var kpiOpenBox = document.getElementById('kpi_open_ids_box');
-    var kpiClosedBox = document.getElementById('kpi_closed_ids_box');
-
-    // Initialize SQL.js using official WASM host; fallback inside ensureSqlJs()
-    window.initSqlJs({ locateFile: function(file){ return 'https://sql.js.org/dist/' + file; } })
-      .then(function(Module){ SQL = Module; })
-      .catch(function(err){
-        console.error('SQL.js init failed: ', err);
-        showBanner('SQL.js failed to initialize: '+err.message);
-      });
-
-    fileInput.addEventListener('change', function(e){ var f = e.target.files && e.target.files[0]; if(!f) return; f.arrayBuffer().then(function(ab){ try { db = new SQL.Database(new Uint8Array(ab)); findMilestoneTable(); detectColumns(); populateProjectFilter(); populateMilestoneFilter(); renderAll(); } catch(err){ alert('Could not open DB: '+err); } }); });
-    refreshBtn.addEventListener('click', function(){ if(!db){ alert('Select a DB file first.'); return; } renderAll(); });
-    projectFilter.addEventListener('change', function(){ if(db){ populateMilestoneFilter(); renderAll(); } });
-    milestoneFilter.addEventListener('change', function(){ if(db){ renderAll(); } });
-    onlyRegression.addEventListener('change', function(){ if(db){ populateMilestoneFilter(); renderAll(); } });
-
-    function q(sql){ try{ var res = db.exec(sql); if(!res || res.length===0) return []; var cols=res[0].columns; return res[0].values.map(function(row){ var o={}; for(var i=0;i<cols.length;i++){ o[cols[i]] = row[i]; } return o; }); }catch(e){ alert('SQL error: '+e+'\nQuery: '+sql); return []; } }
-    function tableExists(name){ return q("SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower('"+name+"')").length>0; }
-    function findMilestoneTable(){ var candidates=['milestone','Milestone','testrail_milestone']; for(var i=0;i<candidates.length;i++){ if(tableExists(candidates[i])){ schema.table=candidates[i]; break; } } if(!schema.table){ var all = q("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"); alert('Could not find milestone table. Expected one of: milestone, Milestone, testrail_milestone.\nTables found: '+ all.map(function(r){return r.name;}).join(', ')); return; } }
-    function detectColumns(){ if(!schema.table) return; var info = db.exec('PRAGMA table_info('+schema.table+')'); if(!info || info.length===0){ alert('Could not read table info for '+schema.table); return; } var names = info[0].values.map(function(v){ return String(v[1]); }); function findLike(expected){ var idx = names.findIndex(function(n){ return n.toLowerCase()===expected.toLowerCase(); }); return idx>=0 ? names[idx] : expected; } schema.cols.project = findLike('project_name'); schema.cols.milestone = findLike('milestone_name'); schema.cols.run = findLike('run_name'); schema.cols.testcase = findLike('testcase_id'); schema.cols.status = findLike('status'); schema.cols.tags = findLike('tags'); schema.cols.refs = findLike('refs'); schema.cols.open = findLike('open_defects'); schema.cols.closed = findLike('closed_defects'); var hasOpen = names.some(function(n){ return n.toLowerCase()==='open_defects'; }); var hasClosed = names.some(function(n){ return n.toLowerCase()==='closed_defects'; }); schema.hasDefects = hasOpen && hasClosed; defectsRow.style.display = schema.hasDefects ? '' : 'none'; kpiOpenBox.style.display = schema.hasDefects ? '' : 'none'; kpiClosedBox.style.display = schema.hasDefects ? '' : 'none'; var defCols = document.querySelectorAll('#refsTbl .defCol'); defCols.forEach(function(th){ th.style.display = schema.hasDefects ? '' : 'none'; }); schemaStatus.textContent = 'Using table: '+schema.table+' | columns: ' + Object.keys(schema.cols).map(function(k){return k+':'+schema.cols[k];}).join(', '); }
-    function sanitize(str){ return String(str).replace(/'/g, "''"); }
-    function whereClause(){ var conds=[]; var proj = projectFilter.value; if(proj){ conds.push(schema.cols.project + " = '"+sanitize(proj)+"'"); } var ms = milestoneFilter.value; if(ms){ conds.push(schema.cols.milestone + " = '"+sanitize(ms)+"'"); } if(onlyRegression.checked){ conds.push("LOWER("+schema.cols.tags+") LIKE '%regression%'"); } return conds.length? (' WHERE '+conds.join(' AND ')) : ''; }
-    function populateProjectFilter(){ while(projectFilter.options.length>1) projectFilter.remove(1); if(!schema.table) return; var sql='SELECT DISTINCT '+schema.cols.project+' AS p FROM '+schema.table+' WHERE '+schema.cols.project+" IS NOT NULL AND TRIM("+schema.cols.project+")<>'' ORDER BY "+schema.cols.project; q(sql).forEach(function(r){ var o=document.createElement('option'); o.value=r.p; o.textContent=r.p; projectFilter.appendChild(o); }); }
-    function populateMilestoneFilter(){ while(milestoneFilter.options.length>1) milestoneFilter.remove(1); if(!schema.table) return; var conds=[]; var proj = projectFilter.value; if(proj){ conds.push(schema.cols.project + " = '"+sanitize(proj)+"'"); } if(onlyRegression.checked){ conds.push("LOWER("+schema.cols.tags+") LIKE '%regression%'"); } var where=conds.length? (' WHERE '+conds.join(' AND ')) : ''; var sql='SELECT DISTINCT '+schema.cols.milestone+' AS m FROM '+schema.table + where + (where? ' AND ' : ' WHERE ') + schema.cols.milestone + " IS NOT NULL AND TRIM("+schema.cols.milestone+")<>'' ORDER BY "+schema.cols.milestone; q(sql).forEach(function(r){ var o=document.createElement('option'); o.value=r.m; o.textContent=r.m; milestoneFilter.appendChild(o); }); }
-
-    function escapeHtml(s){ return String(s).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]; }); }
-    function normalizeId(t){ if(!t) return ''; t=String(t).trim(); var b=t.indexOf('/browse/'); if(b>=0){ t=t.substring(b+9).split(/[?#\/\s]/)[0].trim(); } if(t.startsWith('[') && t.indexOf(']')>0){ t=t.substring(1, t.indexOf(']')).trim(); } t=t.replace(/\u200B/g,''); t=t.replace(/[.,;:]+$/, ''); if((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))){ t=t.substring(1, t.length-1).trim(); } return t.toUpperCase(); }
-    function parseIdsToNormSet(s){ var set=new Set(); if(s===undefined||s===null) return set; var raw=String(s).trim(); if(!raw) return set; raw.split(/[\s,;|]+/).forEach(function(piece){ var id=normalizeId(piece); if(id && DEFECT_KEY_REGEX.test(id) && !/^(NULL|N\/A|NA|NONE|-|—|–|\[\])$/i.test(id)){ set.add(id); } }); return set; }
-
-    function destroyChart(id){ if(charts[id]){ charts[id].destroy(); charts[id]=null; } }
-    function drawChart(id, ctx, cfg){ destroyChart(id); charts[id] = new Chart(ctx, cfg); }
-
-    function renderAll(){ if(!db || !schema.table) return; var rows = q('SELECT '+[ schema.cols.project+' AS project', schema.cols.milestone+' AS milestone', schema.cols.run+' AS run', schema.cols.testcase+' AS testcase', schema.cols.status+' AS status', schema.cols.tags+' AS tags', schema.cols.refs+' AS refs', schema.cols.open+' AS open_defects', schema.cols.closed+' AS closed_defects' ].join(',')+' FROM '+schema.table + whereClause()); var counts = { Passed:0, Failed:0, Blocked:0, Retest:0, Untested:0, Other:0 }; rows.forEach(function(r){ var st = normStatus(r.status); if(counts.hasOwnProperty(st)) counts[st]++; else counts.Other++; }); var total = rows.length, passed = counts.Passed||0, failed = counts.Failed||0, other = total - passed - failed; var pctPass = total>0 ? (passed/total*100) : 0, pctFail = total>0 ? (failed/total*100) : 0; document.getElementById('kpi_total').textContent = total.toLocaleString(); document.getElementById('kpi_passed').textContent = passed.toLocaleString(); document.getElementById('kpi_failed').textContent = failed.toLocaleString(); document.getElementById('kpi_pct_pass').textContent = pctPass.toFixed(2)+'%'; document.getElementById('kpi_pct_fail').textContent = pctFail.toFixed(2)+'%'; document.getElementById('kpi_other').textContent = other.toLocaleString(); if(schema.hasDefects){ var globalOpen=new Set(), globalClosed=new Set(); rows.forEach(function(r){ parseIdsToNormSet(r.open_defects).forEach(function(id){globalOpen.add(id);}); parseIdsToNormSet(r.closed_defects).forEach(function(id){globalClosed.add(id);}); }); var openMinusClosed = new Set(); globalOpen.forEach(function(id){ if(id && !globalClosed.has(id)) openMinusClosed.add(id); }); document.getElementById('kpi_open_ids').textContent = openMinusClosed.size.toLocaleString(); document.getElementById('kpi_closed_ids').textContent = globalClosed.size.toLocaleString(); }
-      drawChart('overallDonut', document.getElementById('overallDonut').getContext('2d'), { type:'doughnut', data:{ labels:['Passed','Failed','Other'], datasets:[{ data:[passed, failed, other], backgroundColor:['#34d399','#f87171','#a78bfa'] }] }, options:{ plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } } });
-      var byRunMap = new Map(); rows.forEach(function(r){ var run=r.run||'(no run)'; var st=normStatus(r.status); var m=byRunMap.get(run)||{}; m[st]=(m[st]||0)+1; byRunMap.set(run,m); }); var runLabels = Array.from(byRunMap.keys()); var stNames = ['Passed','Failed','Blocked','Retest','Untested','Other']; var palette = {'Passed':'#34d399','Failed':'#f87171','Blocked':'#fbbf24','Retest':'#60a5fa','Untested':'#9ca3af','Other':'#a78bfa'}; var datasets = stNames.map(function(s){ return { label:s, data:runLabels.map(function(rn){ var m=byRunMap.get(rn)||{}; return m[s]||0; }), backgroundColor:palette[s] }; }); drawChart('statusByRun', document.getElementById('statusByRun').getContext('2d'), { type:'bar', data:{ labels: runLabels, datasets: datasets }, options:{ responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } });
-      var topN = Math.max(1, Number(topNRefsInput.value)||15); var hideBlank = hideBlankRefs.checked; var refsAgg = new Map(); rows.forEach(function(r){ var ref=(r.refs && String(r.refs).trim()!=='')? String(r.refs).trim() : '(blank)'; if(hideBlank && ref==='(blank)') return; var a=refsAgg.get(ref)||{total:0,passed:0,failed:0,open:new Set(),closed:new Set()}; a.total++; var st=normStatus(r.status); if(st==='Passed') a.passed++; else if(st==='Failed') a.failed++; parseIdsToNormSet(r.open_defects).forEach(function(id){ a.open.add(id); }); parseIdsToNormSet(r.closed_defects).forEach(function(id){ a.closed.add(id); }); refsAgg.set(ref,a); }); var refsSorted = Array.from(refsAgg.entries()).map(function(e){ var k=e[0],v=e[1]; var openMinusClosed = new Set(Array.from(v.open).filter(function(id){ return !v.closed.has(id); })); return { ref:k, total:v.total, passed:v.passed, failed:v.failed, open:openMinusClosed.size, closed:v.closed.size, pct: v.total>0?(v.passed/v.total*100):0 }; }).sort(function(a,b){ return (b.total - a.total) || (b.passed - a.passed) || (b.pct - a.pct); }).slice(0, topN);
-      drawChart('statusByRefs', document.getElementById('statusByRefs').getContext('2d'), { type:'bar', data:{ labels: refsSorted.map(function(x){return x.ref;}), datasets:[ { label:'Passed', data: refsSorted.map(function(x){return x.passed;}), backgroundColor:'#34d399' }, { label:'Failed', data: refsSorted.map(function(x){return x.failed;}), backgroundColor:'#f87171' }, { label:'Other', data: refsSorted.map(function(x){ return Math.max(x.total - x.passed - x.failed,0); }), backgroundColor:'#9ca3af' } ] }, options:{ indexAxis:'y', responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } });
-      drawChart('pctPassByRefs', document.getElementById('pctPassByRefs').getContext('2d'), { type:'bar', data:{ labels: refsSorted.map(function(x){return x.ref;}), datasets:[{ label:'% Pass', data: refsSorted.map(function(x){return x.pct;}), backgroundColor:'#60a5fa' }] }, options:{ indexAxis:'y', scales:{ x:{ ticks:{ color:'#e5e7eb', callback:function(v){return v+'%';} }, suggestedMin:0, suggestedMax:100 }, y:{ ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } }, tooltip:{ callbacks:{ label:function(ctx){ return ctx.raw.toFixed(2)+'%'; } } } } });
-      if(schema.hasDefects){ var defRun = new Map(); rows.forEach(function(r){ var rn = r.run || '(no run)'; var obj=defRun.get(rn)||{open:new Set(), closed:new Set()}; parseIdsToNormSet(r.open_defects).forEach(function(id){ obj.open.add(id); }); parseIdsToNormSet(r.closed_defects).forEach(function(id){ obj.closed.add(id); }); defRun.set(rn,obj); }); var dLabels = Array.from(defRun.keys()); var openData = dLabels.map(function(l){ var s=defRun.get(l); return Array.from(s.open).filter(function(id){ return !s.closed.has(id); }).length; }); var closedData = dLabels.map(function(l){ return defRun.get(l).closed.size; }); drawChart('defectsByRun', document.getElementById('defectsByRun').getContext('2d'), { type:'bar', data:{ labels:dLabels, datasets:[ { label:'Open IDs (unique)', data: openData, backgroundColor:'#fb7185' }, { label:'Closed IDs (unique)', data: closedData, backgroundColor:'#34d399' } ] }, options:{ responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } }); }
-      var tbody = document.querySelector('#refsTbl tbody'); tbody.innerHTML=''; refsSorted.forEach(function(x){ var tr=document.createElement('tr'); tr.innerHTML = '<td>'+escapeHtml(x.ref)+'</td>'+'<td>'+x.total.toLocaleString()+'</td>'+'<td>'+x.passed.toLocaleString()+'</td>'+'<td>'+x.failed.toLocaleString()+'</td>'+'<td>'+x.pct.toFixed(2)+'%</td>'+'<td>'+x.open.toLocaleString()+'</td>'+'<td>'+x.closed.toLocaleString()+'</td>'; tbody.appendChild(tr); });
-    }
-
-    function showBanner(msg){ var b=document.getElementById('banner'); if(!b) return; b.style.display='block'; b.textContent=msg; }
-    function normStatus(s){ s=(s||'').toString().trim().toLowerCase(); if(['pass','passed','ok','success'].indexOf(s)>=0) return 'Passed'; if(['fail','failed'].indexOf(s)>=0) return 'Failed'; if(['blocked'].indexOf(s)>=0) return 'Blocked'; if(['retest','re-test'].indexOf(s)>=0) return 'Retest'; if(['untested','not run','notrun'].indexOf(s)>=0) return 'Untested'; return s? (s.charAt(0).toUpperCase()+s.slice(1)):'(none)'; }
+  if (typeof Chart === 'undefined') {
+    showBanner('Chart.js not found. Make sure /assets/chart.umd.js is present.');
+    return;
   }
+
+  var SQL; var db; var charts = {};
+  var schema = { table: null, cols: { project:'project_name', milestone:'milestone_name', run:'run_name', testcase:'testcase_id', status:'status', tags:'tags', refs:'refs', open:'open_defects', closed:'closed_defects' }, hasDefects: false };
+  var DEFECT_KEY_REGEX = /^[A-Z][A-Z0-9]+-\d+$/;
+
+  var fileInput = document.getElementById('dbfile');
+  var projectFilter = document.getElementById('projectFilter');
+  var milestoneFilter = document.getElementById('milestoneFilter');
+  var onlyRegression = document.getElementById('onlyRegression');
+  var refreshBtn = document.getElementById('refreshBtn');
+  var topNRefsInput = document.getElementById('topNRefs');
+  var hideBlankRefs = document.getElementById('hideBlankRefs');
+  var schemaStatus = document.getElementById('schemaStatus');
+  var defectsRow = document.getElementById('defectsRow');
+  var kpiOpenBox = document.getElementById('kpi_open_ids_box');
+  var kpiClosedBox = document.getElementById('kpi_closed_ids_box');
+
+  // Initialize SQL.js using local /assets path
+  initSqlJs({ locateFile: function(file){ return 'assets/' + file; } })
+    .then(function(Module){ SQL = Module; })
+    .catch(function(err){ console.error('SQL.js init failed', err); showBanner('SQL.js init failed: '+err.message); });
+
+  fileInput.addEventListener('change', function(e){ var f=e.target.files && e.target.files[0]; if(!f) return; f.arrayBuffer().then(function(ab){ try { db = new SQL.Database(new Uint8Array(ab)); findMilestoneTable(); detectColumns(); populateProjectFilter(); populateMilestoneFilter(); renderAll(); } catch(err){ alert('Could not open DB: '+err); } }); });
+  refreshBtn.addEventListener('click', function(){ if(!db){ alert('Select a DB file first.'); return; } renderAll(); });
+  projectFilter.addEventListener('change', function(){ if(db){ populateMilestoneFilter(); renderAll(); } });
+  milestoneFilter.addEventListener('change', function(){ if(db){ renderAll(); } });
+  onlyRegression.addEventListener('change', function(){ if(db){ populateMilestoneFilter(); renderAll(); } });
+
+  function q(sql){ try{ var res = db.exec(sql); if(!res || res.length===0) return []; var cols=res[0].columns; return res[0].values.map(function(row){ var o={}; for(var i=0;i<cols.length;i++){ o[cols[i]] = row[i]; } return o; }); }catch(e){ alert('SQL error: '+e+'\nQuery: '+sql); return []; } }
+  function tableExists(name){ return q("SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower('"+name+"')").length>0; }
+  function findMilestoneTable(){ var candidates=['milestone','Milestone','testrail_milestone']; for(var i=0;i<candidates.length;i++){ if(tableExists(candidates[i])){ schema.table=candidates[i]; break; } } if(!schema.table){ var all = q("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"); alert('Could not find milestone table. Expected one of: milestone, Milestone, testrail_milestone.\nTables found: '+ all.map(function(r){return r.name;}).join(', ')); return; } }
+  function detectColumns(){ if(!schema.table) return; var info = db.exec('PRAGMA table_info('+schema.table+')'); if(!info || info.length===0){ alert('Could not read table info for '+schema.table); return; } var names = info[0].values.map(function(v){ return String(v[1]); }); function findLike(expected){ var idx = names.findIndex(function(n){ return n.toLowerCase()===expected.toLowerCase(); }); return idx>=0 ? names[idx] : expected; } schema.cols.project = findLike('project_name'); schema.cols.milestone = findLike('milestone_name'); schema.cols.run = findLike('run_name'); schema.cols.testcase = findLike('testcase_id'); schema.cols.status = findLike('status'); schema.cols.tags = findLike('tags'); schema.cols.refs = findLike('refs'); schema.cols.open = findLike('open_defects'); schema.cols.closed = findLike('closed_defects'); var hasOpen = names.some(function(n){ return n.toLowerCase()==='open_defects'; }); var hasClosed = names.some(function(n){ return n.toLowerCase()==='closed_defects'; }); schema.hasDefects = hasOpen && hasClosed; defectsRow.style.display = schema.hasDefects ? '' : 'none'; kpiOpenBox.style.display = schema.hasDefects ? '' : 'none'; kpiClosedBox.style.display = schema.hasDefects ? '' : 'none'; var defCols = document.querySelectorAll('#refsTbl .defCol'); defCols.forEach(function(th){ th.style.display = schema.hasDefects ? '' : 'none'; }); schemaStatus.textContent = 'Using table: '+schema.table+' | columns: ' + Object.keys(schema.cols).map(function(k){return k+':'+schema.cols[k];}).join(', '); }
+  function sanitize(str){ return String(str).replace(/'/g, "''"); }
+  function whereClause(){ var conds=[]; var proj = projectFilter.value; if(proj){ conds.push(schema.cols.project + " = '"+sanitize(proj)+"'"); } var ms = milestoneFilter.value; if(ms){ conds.push(schema.cols.milestone + " = '"+sanitize(ms)+"'"); } if(onlyRegression.checked){ conds.push("LOWER("+schema.cols.tags+") LIKE '%regression%'"); } return conds.length? (' WHERE '+conds.join(' AND ')) : ''; }
+  function populateProjectFilter(){ while(projectFilter.options.length>1) projectFilter.remove(1); if(!schema.table) return; var sql='SELECT DISTINCT '+schema.cols.project+' AS p FROM '+schema.table+' WHERE '+schema.cols.project+" IS NOT NULL AND TRIM("+schema.cols.project+")<>'' ORDER BY "+schema.cols.project; q(sql).forEach(function(r){ var o=document.createElement('option'); o.value=r.p; o.textContent=r.p; projectFilter.appendChild(o); }); }
+  function populateMilestoneFilter(){ while(milestoneFilter.options.length>1) milestoneFilter.remove(1); if(!schema.table) return; var conds=[]; var proj = projectFilter.value; if(proj){ conds.push(schema.cols.project + " = '"+sanitize(proj)+"'"); } if(onlyRegression.checked){ conds.push("LOWER("+schema.cols.tags+") LIKE '%regression%'"); } var where=conds.length? (' WHERE '+conds.join(' AND ')) : ''; var sql='SELECT DISTINCT '+schema.cols.milestone+' AS m FROM '+schema.table + where + (where? ' AND ' : ' WHERE ') + schema.cols.milestone + " IS NOT NULL AND TRIM("+schema.cols.milestone+")<>'' ORDER BY "+schema.cols.milestone; q(sql).forEach(function(r){ var o=document.createElement('option'); o.value=r.m; o.textContent=r.m; milestoneFilter.appendChild(o); }); }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]; }); }
+  function normalizeId(t){ if(!t) return ''; t=String(t).trim(); var b=t.indexOf('/browse/'); if(b>=0){ t=t.substring(b+9).split(/[?#\/\s]/)[0].trim(); } if(t.startsWith('[') && t.indexOf(']')>0){ t=t.substring(1, t.indexOf(']')).trim(); } t=t.replace(/\u200B/g,''); t=t.replace(/[.,;:]+$/, ''); if((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))){ t=t.substring(1, t.length-1).trim(); } return t.toUpperCase(); }
+  function parseIdsToNormSet(s){ var set=new Set(); if(s===undefined||s===null) return set; var raw=String(s).trim(); if(!raw) return set; raw.split(/[\s,;|]+/).forEach(function(piece){ var id=normalizeId(piece); if(id && DEFECT_KEY_REGEX.test(id) && !/^(NULL|N\/A|NA|NONE|-|—|–|\[\])$/i.test(id)){ set.add(id); } }); return set; }
+
+  function destroyChart(id){ if(charts[id]){ charts[id].destroy(); charts[id]=null; } }
+  function drawChart(id, ctx, cfg){ destroyChart(id); charts[id] = new Chart(ctx, cfg); }
+
+  function renderAll(){ if(!db || !schema.table) return; var rows = q('SELECT '+[ schema.cols.project+' AS project', schema.cols.milestone+' AS milestone', schema.cols.run+' AS run', schema.cols.testcase+' AS testcase', schema.cols.status+' AS status', schema.cols.tags+' AS tags', schema.cols.refs+' AS refs', schema.cols.open+' AS open_defects', schema.cols.closed+' AS closed_defects' ].join(',')+' FROM '+schema.table + whereClause()); var counts = { Passed:0, Failed:0, Blocked:0, Retest:0, Untested:0, Other:0 }; rows.forEach(function(r){ var st = normStatus(r.status); if(counts.hasOwnProperty(st)) counts[st]++; else counts.Other++; }); var total = rows.length, passed = counts.Passed||0, failed = counts.Failed||0, other = total - passed - failed; var pctPass = total>0 ? (passed/total*100) : 0, pctFail = total>0 ? (failed/total*100) : 0; document.getElementById('kpi_total').textContent = total.toLocaleString(); document.getElementById('kpi_passed').textContent = passed.toLocaleString(); document.getElementById('kpi_failed').textContent = failed.toLocaleString(); document.getElementById('kpi_pct_pass').textContent = pctPass.toFixed(2)+'%'; document.getElementById('kpi_pct_fail').textContent = pctFail.toFixed(2)+'%'; document.getElementById('kpi_other').textContent = other.toLocaleString(); if(schema.hasDefects){ var globalOpen=new Set(), globalClosed=new Set(); rows.forEach(function(r){ parseIdsToNormSet(r.open_defects).forEach(function(id){globalOpen.add(id);}); parseIdsToNormSet(r.closed_defects).forEach(function(id){globalClosed.add(id);}); }); var openMinusClosed = new Set(); globalOpen.forEach(function(id){ if(id && !globalClosed.has(id)) openMinusClosed.add(id); }); document.getElementById('kpi_open_ids').textContent = openMinusClosed.size.toLocaleString(); document.getElementById('kpi_closed_ids').textContent = globalClosed.size.toLocaleString(); }
+    drawChart('overallDonut', document.getElementById('overallDonut').getContext('2d'), { type:'doughnut', data:{ labels:['Passed','Failed','Other'], datasets:[{ data:[passed, failed, other], backgroundColor:['#34d399','#f87171','#a78bfa'] }] }, options:{ plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } } });
+    var byRunMap = new Map(); rows.forEach(function(r){ var run=r.run||'(no run)'; var st=normStatus(r.status); var m=byRunMap.get(run)||{}; m[st]=(m[st]||0)+1; byRunMap.set(run,m); }); var runLabels = Array.from(byRunMap.keys()); var stNames = ['Passed','Failed','Blocked','Retest','Untested','Other']; var palette = {'Passed':'#34d399','Failed':'#f87171','Blocked':'#fbbf24','Retest':'#60a5fa','Untested':'#9ca3af','Other':'#a78bfa'}; var datasets = stNames.map(function(s){ return { label:s, data:runLabels.map(function(rn){ var m=byRunMap.get(rn)||{}; return m[s]||0; }), backgroundColor:palette[s] }; }); drawChart('statusByRun', document.getElementById('statusByRun').getContext('2d'), { type:'bar', data:{ labels: runLabels, datasets: datasets }, options:{ responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } });
+    var topN = Math.max(1, Number(topNRefsInput.value)||15); var hideBlank = hideBlankRefs.checked; var refsAgg = new Map(); rows.forEach(function(r){ var ref=(r.refs && String(r.refs).trim()!=='')? String(r.refs).trim() : '(blank)'; if(hideBlank && ref==='(blank)') return; var a=refsAgg.get(ref)||{total:0,passed:0,failed:0,open:new Set(),closed:new Set()}; a.total++; var st=normStatus(r.status); if(st==='Passed') a.passed++; else if(st==='Failed') a.failed++; parseIdsToNormSet(r.open_defects).forEach(function(id){ a.open.add(id); }); parseIdsToNormSet(r.closed_defects).forEach(function(id){ a.closed.add(id); }); refsAgg.set(ref,a); }); var refsSorted = Array.from(refsAgg.entries()).map(function(e){ var k=e[0],v=e[1]; var openMinusClosed = new Set(Array.from(v.open).filter(function(id){ return !v.closed.has(id); })); return { ref:k, total:v.total, passed:v.passed, failed:v.failed, open:openMinusClosed.size, closed:v.closed.size, pct: v.total>0?(v.passed/v.total*100):0 }; }).sort(function(a,b){ return (b.total - a.total) || (b.passed - a.passed) || (b.pct - a.pct); }).slice(0, topN);
+    drawChart('statusByRefs', document.getElementById('statusByRefs').getContext('2d'), { type:'bar', data:{ labels: refsSorted.map(function(x){return x.ref;}), datasets:[ { label:'Passed', data: refsSorted.map(function(x){return x.passed;}), backgroundColor:'#34d399' }, { label:'Failed', data: refsSorted.map(function(x){return x.failed;}), backgroundColor:'#f87171' }, { label:'Other', data: refsSorted.map(function(x){ return Math.max(x.total - x.passed - x.failed,0); }), backgroundColor:'#9ca3af' } ] }, options:{ indexAxis:'y', responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } });
+    drawChart('pctPassByRefs', document.getElementById('pctPassByRefs').getContext('2d'), { type:'bar', data:{ labels: refsSorted.map(function(x){return x.ref;}), datasets:[{ label:'% Pass', data: refsSorted.map(function(x){return x.pct;}), backgroundColor:'#60a5fa' }] }, options:{ indexAxis:'y', scales:{ x:{ ticks:{ color:'#e5e7eb', callback:function(v){return v+'%';} }, suggestedMin:0, suggestedMax:100 }, y:{ ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } }, tooltip:{ callbacks:{ label:function(ctx){ return ctx.raw.toFixed(2)+'%'; } } } } });
+    if(schema.hasDefects){ var defRun = new Map(); rows.forEach(function(r){ var rn = r.run || '(no run)'; var obj=defRun.get(rn)||{open:new Set(), closed:new Set()}; parseIdsToNormSet(r.open_defects).forEach(function(id){ obj.open.add(id); }); parseIdsToNormSet(r.closed_defects).forEach(function(id){ obj.closed.add(id); }); defRun.set(rn,obj); }); var dLabels = Array.from(defRun.keys()); var openData = dLabels.map(function(l){ var s=defRun.get(l); return Array.from(s.open).filter(function(id){ return !s.closed.has(id); }).length; }); var closedData = dLabels.map(function(l){ return defRun.get(l).closed.size; }); drawChart('defectsByRun', document.getElementById('defectsByRun').getContext('2d'), { type:'bar', data:{ labels:dLabels, datasets:[ { label:'Open IDs (unique)', data: openData, backgroundColor:'#fb7185' }, { label:'Closed IDs (unique)', data: closedData, backgroundColor:'#34d399' } ] }, options:{ responsive:true, scales:{ x:{ stacked:true, ticks:{ color:'#e5e7eb' } }, y:{ stacked:true, ticks:{ color:'#e5e7eb' } } }, plugins:{ legend:{ labels:{ color:'#e5e7eb' } } } }); }
+    var tbody = document.querySelector('#refsTbl tbody'); tbody.innerHTML=''; refsSorted.forEach(function(x){ var tr=document.createElement('tr'); tr.innerHTML = '<td>'+escapeHtml(x.ref)+'</td>'+'<td>'+x.total.toLocaleString()+'</td>'+'<td>'+x.passed.toLocaleString()+'</td>'+'<td>'+x.failed.toLocaleString()+'</td>'+'<td>'+x.pct.toFixed(2)+'%</td>'+'<td>'+x.open.toLocaleString()+'</td>'+'<td>'+x.closed.toLocaleString()+'</td>'; tbody.appendChild(tr); });
+  }
+  function normStatus(s){ s=(s||'').toString().trim().toLowerCase(); if(['pass','passed','ok','success'].indexOf(s)>=0) return 'Passed'; if(['fail','failed'].indexOf(s)>=0) return 'Failed'; if(['blocked'].indexOf(s)>=0) return 'Blocked'; if(['retest','re-test'].indexOf(s)>=0) return 'Retest'; if(['untested','not run','notrun'].indexOf(s)>=0) return 'Untested'; return s? (s.charAt(0).toUpperCase()+s.slice(1)):'(none)'; }
 });
 </script>
 </body>
